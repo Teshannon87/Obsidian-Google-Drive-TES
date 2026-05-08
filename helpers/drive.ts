@@ -351,7 +351,6 @@ export const getDriveClient = (t: ObsidianGoogleDrive) => {
 	const batchDelete = async (ids: string[]) => {
 		const body = new FormData();
 
-		// Loop through file IDs to create each delete request
 		ids.forEach((fileId, index) => {
 			const deleteRequest = [
 				`--batch_boundary`,
@@ -504,6 +503,79 @@ export const getDriveClient = (t: ObsidianGoogleDrive) => {
 		return configFilesToSync;
 	};
 
+	// Lists all files in a Drive folder by parent ID, bypassing the vault property filter.
+	// This allows detection of files added outside the Obsidian plugin.
+	const listFolderContents = async (folderId: string, pageToken?: string) => {
+		const q = encodeURIComponent(
+			`'${folderId}' in parents and trashed=false`
+		);
+		const fields =
+			"nextPageToken,files(id,name,mimeType,modifiedTime,properties)";
+		const result = await drive
+			.get(
+				`drive/v3/files?fields=${fields}&pageSize=1000&q=${q}${
+					pageToken ? "&pageToken=" + pageToken : ""
+				}`
+			)
+			.json<any>();
+		if (!result) return;
+		return result as { nextPageToken?: string; files: FileMetadata[] };
+	};
+
+	// Recursively scans the entire vault Drive folder, returning a map of
+	// driveId → { path, mimeType, modifiedTime } for every file,
+	// regardless of whether vault/path properties are set on the Drive file.
+	// This is the core mechanism for detecting files added outside the plugin.
+	const scanVaultFolder = async () => {
+		const rootId = await getRootFolderId();
+		if (!rootId) return;
+
+		const result = new Map<
+			string,
+			{ path: string; mimeType: string; modifiedTime: string }
+		>();
+		const configDir = t.app.vault.configDir;
+
+		const scanFolder = async (folderId: string, folderPath: string) => {
+			let pageToken: string | undefined;
+			do {
+				const page = await listFolderContents(folderId, pageToken);
+				if (!page) return;
+
+				for (const file of page.files) {
+					if (file.properties?.obsidian === "vault") continue;
+
+					const filePath = folderPath
+						? `${folderPath}/${file.name}`
+						: file.name;
+
+					// Skip .obsidian config folder — managed by separate logic
+					if (
+						filePath === configDir ||
+						filePath.startsWith(configDir + "/")
+					) {
+						continue;
+					}
+
+					result.set(file.id, {
+						path: filePath,
+						mimeType: file.mimeType,
+						modifiedTime: file.modifiedTime,
+					});
+
+					if (file.mimeType === folderMimeType) {
+						await scanFolder(file.id, filePath);
+					}
+				}
+
+				pageToken = page.nextPageToken;
+			} while (pageToken);
+		};
+
+		await scanFolder(rootId, "");
+		return result;
+	};
+
 	return {
 		paginateFiles,
 		searchFiles,
@@ -523,12 +595,14 @@ export const getDriveClient = (t: ObsidianGoogleDrive) => {
 		checkConnection,
 		deleteFilesMinimumOperations,
 		getConfigFilesToSync,
+		listFolderContents,
+		scanVaultFolder,
 	};
 };
 
-export const checkConnection = async () => {
+export const checkConnection = async (serverUrl = "https://ogd.richardxiong.com") => {
 	try {
-		const result = await ky.get("https://ogd.richardxiong.com/api/ping");
+		const result = await ky.get(`${serverUrl}/api/ping`);
 		return result.ok;
 	} catch {
 		return false;

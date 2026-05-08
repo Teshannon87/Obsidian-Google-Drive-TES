@@ -1,10 +1,10 @@
 {
 	"id": "google-drive-sync",
-	"name": "Google Drive Sync",
-	"version": "2.2.2",
+	"name": "Google Drive Sync+",
+	"version": "3.0.0",
 	"minAppVersion": "1.6.0",
-	"description": "Syncs a vault into Google Drive for cross-platform use (works for iOS).",
-	"author": "Richard Xiong",
-	"authorUrl": "https://ogd.richardxiong.com",
+	"description": "Syncs an Obsidian vault with Google Drive, including detection of files added outside Obsidian.",
+	"author": "Tom Shannon (fork of RichardX366/Obsidian-Google-Drive)",
+	"authorUrl": "https://github.com/Teshannon87/Obsidian-Google-Drive-TES",
 	"isDesktopOnly": false
 }

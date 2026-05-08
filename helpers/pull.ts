@@ -60,12 +60,6 @@ export const pull = async (
 			return file;
 		});
 
-	if (!recentlyModified.length && !deletions.length) {
-		if (silenceNotices) return;
-		t.endSync(syncNotice);
-		return new Notice("You're up to date!");
-	}
-
 	const pathToId = Object.fromEntries(
 		Object.entries(t.settings.driveIdToPath).map(([id, path]) => [path, id])
 	);
@@ -119,7 +113,7 @@ export const pull = async (
 
 	await deleteFiles();
 
-	syncNotice?.setMessage("Syncing (33%)");
+	syncNotice?.setMessage("Syncing (25%)");
 
 	const upsertFiles = async () => {
 		const newFolders = recentlyModified.filter(
@@ -174,7 +168,7 @@ export const pull = async (
 				const content = await t.drive.getFile(file.id).arrayBuffer();
 
 				syncNotice?.setMessage(
-					getSyncMessage(33, 100, completed, newNotes.length)
+					getSyncMessage(25, 60, completed, newNotes.length)
 				);
 
 				if (localFile instanceof TFile) {
@@ -191,6 +185,16 @@ export const pull = async (
 	};
 
 	await upsertFiles();
+
+	syncNotice?.setMessage("Syncing (60%)");
+
+	// Scan the full Drive folder to detect files added outside the Obsidian plugin.
+	// These files won't have vault/path properties set, so they're invisible to the
+	// property-based search above. The folder scan finds them by traversing the
+	// Drive folder tree directly.
+	await pullExternalFiles(t, pathToId, syncNotice);
+
+	syncNotice?.setMessage("Syncing (80%)");
 
 	const deleteConfigs = async () => {
 		const configDeletions = await Promise.all(
@@ -284,4 +288,101 @@ export const pull = async (
 	await t.endSync(syncNotice);
 
 	new Notice("Files have been synced from Google Drive!");
+};
+
+// Finds files in the Drive vault folder that are not tracked in driveIdToPath.
+// These are files added outside the Obsidian plugin (e.g., from Google Drive web,
+// another device's file system, or a different sync tool).
+// Downloads them locally and tags them with vault+path properties on Drive.
+const pullExternalFiles = async (
+	t: ObsidianGoogleDrive,
+	pathToId: Record<string, string>,
+	syncNotice: any
+) => {
+	const { vault } = t.app;
+	const adapter = vault.adapter;
+	const vaultName = vault.getName();
+
+	const driveFiles = await t.drive.scanVaultFolder();
+	if (!driveFiles) return;
+
+	const knownIds = new Set(Object.keys(t.settings.driveIdToPath));
+
+	const unknownFolders: { id: string; path: string }[] = [];
+	const unknownFiles: {
+		id: string;
+		path: string;
+		modifiedTime: string;
+	}[] = [];
+
+	for (const [id, { path, mimeType, modifiedTime }] of driveFiles) {
+		if (knownIds.has(id)) continue;
+
+		// Register the Drive ID → path mapping immediately
+		t.settings.driveIdToPath[id] = path;
+		pathToId[path] = id;
+
+		if (mimeType === folderMimeType) {
+			unknownFolders.push({ id, path });
+		} else {
+			unknownFiles.push({ id, path, modifiedTime });
+		}
+	}
+
+	if (!unknownFolders.length && !unknownFiles.length) return;
+
+	// Create folders in order of depth (shallowest first)
+	if (unknownFolders.length) {
+		const batches = foldersToBatches(unknownFolders.map((f) => f.path));
+		for (const batch of batches) {
+			await Promise.all(
+				batch.map(async (folderPath) => {
+					// Tag the Drive file with path+vault properties so future syncs work normally
+					const folderId = pathToId[folderPath];
+					if (folderId) {
+						t.drive.updateFileMetadata(folderId, {
+							properties: { path: folderPath, vault: vaultName },
+						});
+					}
+					if (
+						vault.getFolderByPath(folderPath) ||
+						(await adapter.exists(folderPath))
+					) {
+						return;
+					}
+					return t.createFolder(folderPath);
+				})
+			);
+		}
+	}
+
+	// Download files not present locally
+	if (unknownFiles.length) {
+		let completed = 0;
+		await batchAsyncs(
+			unknownFiles.map(({ id, path, modifiedTime }) => async () => {
+				// Tag the Drive file with path+vault properties
+				t.drive.updateFileMetadata(id, {
+					properties: { path, vault: vaultName },
+				});
+
+				// Skip if already exists locally (e.g., tracking was lost but file is present)
+				const localExists =
+					vault.getFileByPath(path) || (await adapter.exists(path));
+				if (!localExists) {
+					const content = await t.drive.getFile(id).arrayBuffer();
+					await t.upsertFile(path, content, modifiedTime);
+				}
+
+				completed++;
+				syncNotice?.setMessage(
+					getSyncMessage(60, 80, completed, unknownFiles.length)
+				);
+			})
+		);
+	}
+
+	new Notice(
+		`Found ${unknownFolders.length + unknownFiles.length} file(s) added outside Obsidian — synced locally.`
+	);
 };

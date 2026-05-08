@@ -21,6 +21,8 @@ interface PluginSettings {
 	driveIdToPath: Record<string, string>;
 	lastSyncedAt: number;
 	changesToken: string;
+	autoSyncInterval: number; // minutes; 0 = disabled
+	tokenServerUrl: string;   // defaults to https://ogd.richardxiong.com
 }
 
 const DEFAULT_SETTINGS: PluginSettings = {
@@ -29,6 +31,8 @@ const DEFAULT_SETTINGS: PluginSettings = {
 	driveIdToPath: {},
 	lastSyncedAt: 0,
 	changesToken: "",
+	autoSyncInterval: 0,
+	tokenServerUrl: "",
 };
 
 export default class ObsidianGoogleDrive extends Plugin {
@@ -40,6 +44,8 @@ export default class ObsidianGoogleDrive extends Plugin {
 	drive = getDriveClient(this);
 	ribbonIcon: HTMLElement;
 	syncing: boolean;
+	statusBarItem: HTMLElement;
+	private autoSyncTimer: number | null = null;
 
 	async onload() {
 		const { vault } = this.app;
@@ -50,7 +56,7 @@ export default class ObsidianGoogleDrive extends Plugin {
 
 		if (!this.settings.refreshToken) {
 			new Notice(
-				"Please add your refresh token to Google Drive Sync through our website or our readme/this plugin's settings. If you haven't already, PLEASE read through this plugin's readme or website CAREFULLY for instructions on how to use this plugin. If you don't know what you're doing, your data could get DELETED.",
+				"Google Drive Sync+: Please add your refresh token in Settings. Read the plugin readme carefully before syncing — incorrect use can cause data loss.",
 				0
 			);
 			return;
@@ -58,7 +64,7 @@ export default class ObsidianGoogleDrive extends Plugin {
 
 		this.ribbonIcon = this.addRibbonIcon(
 			"refresh-cw",
-			"Obsidian Google Drive",
+			"Google Drive Sync+",
 			(event) => {
 				if (this.syncing) return;
 				const menu = new Menu();
@@ -92,6 +98,9 @@ export default class ObsidianGoogleDrive extends Plugin {
 			}
 		);
 
+		this.statusBarItem = this.addStatusBarItem();
+		this.updateStatusBar();
+
 		this.addCommand({
 			id: "push",
 			name: "Push to Google Drive",
@@ -121,17 +130,21 @@ export default class ObsidianGoogleDrive extends Plugin {
 		this.registerEvent(vault.on("modify", this.handleModify.bind(this)));
 		this.registerEvent(vault.on("rename", this.handleRename.bind(this)));
 
-		checkConnection().then(async (connected) => {
+		checkConnection(this.settings.tokenServerUrl || undefined).then(async (connected) => {
 			if (connected) {
 				this.syncing = true;
 				this.ribbonIcon.addClass("spin");
+				this.updateStatusBar("syncing");
 				await pull(this, true);
 				await this.endSync();
 			}
 		});
+
+		this.startAutoSync();
 	}
 
 	onunload() {
+		this.stopAutoSync();
 		return this.saveSettings();
 	}
 
@@ -261,13 +274,15 @@ export default class ObsidianGoogleDrive extends Plugin {
 	}
 
 	async startSync() {
-		if (!(await checkConnection())) {
+		const serverUrl = this.settings.tokenServerUrl || undefined;
+		if (!(await checkConnection(serverUrl))) {
 			throw new Notice(
 				"You are not connected to the internet, so you cannot sync right now. Please try syncing once you have connection again."
 			);
 		}
 		this.ribbonIcon.addClass("spin");
 		this.syncing = true;
+		this.updateStatusBar("syncing");
 		return new Notice("Syncing (0%)", 0);
 	}
 
@@ -301,6 +316,58 @@ export default class ObsidianGoogleDrive extends Plugin {
 		this.ribbonIcon.removeClass("spin");
 		this.syncing = false;
 		syncNotice?.hide();
+		this.updateStatusBar();
+	}
+
+	updateStatusBar(state?: "syncing" | "error") {
+		if (!this.statusBarItem) return;
+		if (state === "syncing") {
+			this.statusBarItem.setText("GDrive: syncing...");
+			return;
+		}
+		if (state === "error") {
+			this.statusBarItem.setText("GDrive: error");
+			return;
+		}
+		if (!this.settings.lastSyncedAt) {
+			this.statusBarItem.setText("GDrive: never synced");
+			return;
+		}
+		const elapsed = Date.now() - this.settings.lastSyncedAt;
+		const minutes = Math.floor(elapsed / 60000);
+		const hours = Math.floor(elapsed / 3600000);
+		const days = Math.floor(elapsed / 86400000);
+		let label: string;
+		if (elapsed < 60000) label = "just now";
+		else if (minutes < 60) label = `${minutes}m ago`;
+		else if (hours < 24) label = `${hours}h ago`;
+		else label = `${days}d ago`;
+		this.statusBarItem.setText(`GDrive: ${label}`);
+	}
+
+	startAutoSync() {
+		this.stopAutoSync();
+		const interval = this.settings.autoSyncInterval;
+		if (!interval || interval <= 0) return;
+		this.autoSyncTimer = window.setInterval(async () => {
+			if (this.syncing) return;
+			const serverUrl = this.settings.tokenServerUrl || undefined;
+			const connected = await checkConnection(serverUrl);
+			if (!connected) return;
+			this.syncing = true;
+			this.ribbonIcon.addClass("spin");
+			this.updateStatusBar("syncing");
+			await pull(this, true);
+			await this.endSync();
+		}, interval * 60 * 1000);
+		this.registerInterval(this.autoSyncTimer);
+	}
+
+	stopAutoSync() {
+		if (this.autoSyncTimer !== null) {
+			window.clearInterval(this.autoSyncTimer);
+			this.autoSyncTimer = null;
+		}
 	}
 }
 
@@ -320,7 +387,7 @@ class SettingsTab extends PluginSettingTab {
 
 		containerEl.createEl("a", {
 			href: "https://ogd.richardxiong.com",
-			text: "Get refresh token",
+			text: "Get refresh token (default server)",
 		});
 
 		new Setting(containerEl)
@@ -352,7 +419,7 @@ class SettingsTab extends PluginSettingTab {
 								.filter(({ path }) => path !== "/").length > 0
 						) {
 							new Notice(
-								"Your current vault is not empty! If you want our plugin to handle the initial sync, you have to clear out the current vault. Check the readme or website for more details.",
+								"Your current vault is not empty! If you want the plugin to handle the initial sync, clear out the current vault first.",
 								0
 							);
 							return cancel();
@@ -372,6 +439,41 @@ class SettingsTab extends PluginSettingTab {
 							"Refresh token saved! Reload Obsidian to activate sync.",
 							0
 						);
+					});
+			});
+
+		new Setting(containerEl)
+			.setName("Auto-sync interval")
+			.setDesc(
+				"Automatically pull from Google Drive every N minutes. Set to 0 to disable."
+			)
+			.addDropdown((dropdown) => {
+				dropdown
+					.addOption("0", "Disabled")
+					.addOption("5", "Every 5 minutes")
+					.addOption("10", "Every 10 minutes")
+					.addOption("15", "Every 15 minutes")
+					.addOption("30", "Every 30 minutes")
+					.addOption("60", "Every hour")
+					.setValue(String(this.plugin.settings.autoSyncInterval || 0))
+					.onChange(async (value) => {
+						this.plugin.settings.autoSyncInterval = parseInt(value);
+						await this.plugin.saveSettings();
+						this.plugin.startAutoSync();
+					});
+			});
+
+		new Setting(containerEl)
+			.setName("Token server URL")
+			.setDesc(
+				"URL of the server that converts refresh tokens to access tokens. Leave blank to use the default (ogd.richardxiong.com). Set to your own server for full independence."
+			)
+			.addText((text) => {
+				text.setPlaceholder("https://ogd.richardxiong.com")
+					.setValue(this.plugin.settings.tokenServerUrl || "")
+					.onChange(async (value) => {
+						this.plugin.settings.tokenServerUrl = value.trim();
+						await this.plugin.saveSettings();
 					});
 			});
 	}

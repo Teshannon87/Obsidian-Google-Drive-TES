@@ -56,3 +56,11 @@
 	color: var(--text-error);
 	font-weight: bolder;
 }
+
+.gdrive-status-syncing {
+	color: var(--text-accent);
+}
+
+.gdrive-status-error {
+	color: var(--text-error);
+}

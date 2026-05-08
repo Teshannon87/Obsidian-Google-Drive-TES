@@ -38,9 +38,11 @@ export const getDriveKy = (t: ObsidianGoogleDrive) => {
 };
 
 export const refreshAccessToken = async (t: ObsidianGoogleDrive) => {
+	const serverUrl =
+		t.settings.tokenServerUrl || "https://ogd.richardxiong.com";
 	try {
 		const { expires_in, access_token } = await ky
-			.post("https://ogd.richardxiong.com/api/access", {
+			.post(`${serverUrl}/api/access`, {
 				json: { refresh_token: t.settings.refreshToken },
 			})
 			.json<any>();
@@ -51,7 +53,7 @@ export const refreshAccessToken = async (t: ObsidianGoogleDrive) => {
 		};
 		return t.accessToken;
 	} catch (e: any) {
-		if (!(await checkConnection())) {
+		if (!(await checkConnection(serverUrl))) {
 			return new Notice(
 				"Something is wrong with your internet connection, so we could not fetch a new access token! Once you're back online, please restart Obsidian.",
 				0
